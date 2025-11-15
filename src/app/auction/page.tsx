@@ -1,10 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
-import Image from 'next/image';
-import { io, Socket } from 'socket.io-client';
 import { DEMO_AUCTION_ITEM } from '@/types/auction';
 import type { Bid } from '@/types/auction';
 
@@ -18,21 +16,26 @@ const INITIAL_BID: Bid = {
 export default function AuctionPage() {
   const { user, logout, isAuthenticated } = useAuth();
   const router = useRouter();
-  const [socket] = useState<Socket>(() => {
-    if (typeof window !== 'undefined') {
-      return io('http://localhost:3000', {
-        transports: ['websocket', 'polling'],
-        autoConnect: false,
-      });
-    }
-    return null as unknown as Socket;
-  });
   const [currentBid, setCurrentBid] = useState<Bid>(INITIAL_BID);
   const [bidHistory, setBidHistory] = useState<Bid[]>([]);
   const [bidAmount, setBidAmount] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [isConnected, setIsConnected] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Fetch current auction state
+  const fetchAuctionState = useCallback(async () => {
+    try {
+      const response = await fetch('/api/auction');
+      if (response.ok) {
+        const data = await response.json();
+        setCurrentBid(data.currentBid);
+        setBidHistory(data.bidHistory);
+      }
+    } catch (err) {
+      console.error('Failed to fetch auction state:', err);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -40,54 +43,16 @@ export default function AuctionPage() {
       return;
     }
 
-    if (!socket) return;
+    // Initial fetch
+    fetchAuctionState();
 
-    // Connect to socket
-    socket.connect();
+    // Poll every 2 seconds for updates (real-time feel)
+    const interval = setInterval(fetchAuctionState, 2000);
 
-    socket.on('connect', () => {
-      console.log('Connected to WebSocket server');
-      setIsConnected(true);
-    });
+    return () => clearInterval(interval);
+  }, [isAuthenticated, router, fetchAuctionState]);
 
-    socket.on('disconnect', () => {
-      console.log('Disconnected from WebSocket server');
-      setIsConnected(false);
-    });
-
-    socket.on(
-      'initial-state',
-      (data: { currentBid: Bid; bidHistory: Bid[] }) => {
-        setCurrentBid(data.currentBid);
-        setBidHistory(data.bidHistory);
-      }
-    );
-
-    socket.on(
-      'bid-update',
-      (data: { currentBid: Bid; bidHistory: Bid[]; newBid: Bid }) => {
-        setCurrentBid(data.currentBid);
-        setBidHistory(data.bidHistory);
-        setError('');
-
-        if (data.newBid.username === user?.username) {
-          setSuccess('Your bid was placed successfully!');
-          setTimeout(() => setSuccess(''), 3000);
-        }
-      }
-    );
-
-    socket.on('bid-error', (data: { message: string }) => {
-      setError(data.message);
-      setTimeout(() => setError(''), 5000);
-    });
-
-    return () => {
-      socket.disconnect();
-    };
-  }, [isAuthenticated, router, user?.username, socket]);
-
-  const handlePlaceBid = (e: React.FormEvent) => {
+  const handlePlaceBid = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setSuccess('');
@@ -104,12 +69,43 @@ export default function AuctionPage() {
       return;
     }
 
-    if (socket && user) {
-      socket.emit('place-bid', {
-        amount,
-        username: user.username,
+    if (!user) {
+      setError('You must be logged in to bid');
+      return;
+    }
+
+    setIsLoading(true);
+
+    try {
+      const response = await fetch('/api/auction', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          amount,
+          username: user.username,
+        }),
       });
-      setBidAmount('');
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setCurrentBid(data.currentBid);
+        setBidHistory(data.bidHistory);
+        setBidAmount('');
+        setSuccess('Your bid was placed successfully!');
+        setTimeout(() => setSuccess(''), 3000);
+
+        // Immediate fetch to update UI
+        fetchAuctionState();
+      } else {
+        setError(data.error || 'Failed to place bid');
+      }
+    } catch {
+      setError('Failed to place bid. Please try again.');
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -149,14 +145,8 @@ export default function AuctionPage() {
             </div>
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2">
-                <div
-                  className={`w-2 h-2 rounded-full ${
-                    isConnected ? 'bg-green-500' : 'bg-red-500'
-                  }`}
-                />
-                <span className="text-sm text-gray-600">
-                  {isConnected ? 'Connected' : 'Disconnected'}
-                </span>
+                <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-sm text-gray-600">Live</span>
               </div>
               <button
                 onClick={logout}
@@ -174,13 +164,10 @@ export default function AuctionPage() {
           {/* Auction Item */}
           <div className="lg:col-span-2">
             <div className="bg-white rounded-lg shadow-lg overflow-hidden">
-              <Image
+              <img
                 src={DEMO_AUCTION_ITEM.image}
                 alt={DEMO_AUCTION_ITEM.title}
-                width={800}
-                height={384}
                 className="w-full h-96 object-cover"
-                priority
               />
               <div className="p-6">
                 <div className="flex items-start justify-between mb-4">
@@ -250,6 +237,7 @@ export default function AuctionPage() {
                     placeholder={`Minimum: $${currentBid.amount + 1}`}
                     step="1"
                     min={currentBid.amount + 1}
+                    disabled={isLoading}
                   />
                 </div>
 
@@ -257,21 +245,24 @@ export default function AuctionPage() {
                   <button
                     type="button"
                     onClick={() => handleQuickBid(5)}
-                    className="px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition cursor-pointer"
+                    disabled={isLoading}
+                    className="px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition cursor-pointer disabled:opacity-50"
                   >
                     +$5
                   </button>
                   <button
                     type="button"
                     onClick={() => handleQuickBid(10)}
-                    className="px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition cursor-pointer"
+                    disabled={isLoading}
+                    className="px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition cursor-pointer disabled:opacity-50"
                   >
                     +$10
                   </button>
                   <button
                     type="button"
                     onClick={() => handleQuickBid(25)}
-                    className="px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition cursor-pointer"
+                    disabled={isLoading}
+                    className="px-3 py-2 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition cursor-pointer disabled:opacity-50"
                   >
                     +$25
                   </button>
@@ -291,10 +282,10 @@ export default function AuctionPage() {
 
                 <button
                   type="submit"
-                  disabled={!isConnected}
+                  disabled={isLoading}
                   className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-bold py-4 px-4 rounded-lg transition duration-200 shadow-md hover:shadow-lg text-lg cursor-pointer"
                 >
-                  Place Bid
+                  {isLoading ? 'Placing Bid...' : 'Place Bid'}
                 </button>
               </form>
 
