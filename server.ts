@@ -4,10 +4,10 @@ import next from 'next';
 import { Server } from 'socket.io';
 
 const dev = process.env.NODE_ENV !== 'production';
-const hostname = 'localhost';
-const port = parseInt(process.env.PORT || '3000' || '8080' || '8000', 10);
+const hostname = dev ? 'localhost' : '0.0.0.0';  // ✅ Production mein 0.0.0.0
+const port = parseInt(process.env.PORT || '3000', 10);  // ✅ Railway PORT use karega
 
-const app = next({ dev, hostname, port });
+const app = next({ dev, hostname: 'localhost', port });  // ✅ Next.js ko localhost dena hai
 const handle = app.getRequestHandler();
 
 interface Bid {
@@ -40,8 +40,9 @@ app.prepare().then(() => {
 
   const io = new Server(server, {
     cors: {
-      origin: '*',
+      origin: dev ? 'http://localhost:3000' : '*',  // ✅ Production mein sab allow
       methods: ['GET', 'POST'],
+      credentials: true,
     },
   });
 
@@ -97,7 +98,9 @@ app.prepare().then(() => {
     });
   });
 
-  server.listen(port, () => {
+  // ✅ Important: Listen on hostname (0.0.0.0 for production)
+  server.listen(port, hostname, () => {
     console.log(`> Ready on http://${hostname}:${port}`);
+    console.log(`> Environment: ${process.env.NODE_ENV}`);
   });
 });
